@@ -26,26 +26,43 @@ module Enkidu
   #   d.run #Blocks
   class Dispatcher
 
+    RUNNING = :running
+    STOPPED = :stopped
     STOP = Object.new
     k=self;STOP.define_singleton_method(:inspect){ "<#{k.name}::STOP>" }
+
+    attr_reader :state
+
 
     def initialize
       @lock = Mutex.new
       @queue = []
       @handlers = []
       @r, @w = IO.pipe
+      @state = STOPPED
       yield self if block_given?
+    end
+
+
+    def running?
+      state == RUNNING
+    end
+
+    def stopped?
+      state == STOPPED
     end
 
 
     # Run the loop. This will block the current thread until the loop is stopped.
     def run
+      @state = RUNNING
       loop do
         IO.select [@r]
         if vals = sync{ queue.shift }
           sync{ @r.read(1) }
           callable, args = *vals
           if callable == STOP
+            @state = STOPPED
             break
           else
             callable.call(*args)
@@ -86,14 +103,30 @@ module Enkidu
     # Stop the dispatcher. This schedules a special STOP signal that will stop the
     # dispatcher when encountered. This means that all other items that were scheduled
     # before it will run first.
+    #
+    # This action is idempotent; it returns true if the dispatcher is currently running
+    # and will be stopped, false if it's already stopped.
     def stop
-      schedule(callable: STOP)
+      if stopped?
+        false
+      else
+        schedule(callable: STOP)
+        true
+      end
     end
 
-    # Stop the dispatcher immediately by scheduling it at the front of the queue. This
-    # means that any other already scheduled items will be ignored.
+    # Stop the dispatcher immediately by scheduling the stop action at the front of the
+    # queue. This means that any other already scheduled items will be ignored.
+    #
+    # This action is idempotent; it returns true if the dispatcher is currently running
+    # and will be stopped, false if it's already stopped.
     def stop!
-      unshift(callable: STOP)
+      if stopped?
+        false
+      else
+        unshift(callable: STOP)
+        true
+      end
     end
 
 
@@ -220,6 +253,9 @@ module Enkidu
 
   class ThreadedDispatcher < Dispatcher
 
+    attr_reader :thread
+
+
     def run
       @thread = Thread.new do
         super
@@ -228,9 +264,16 @@ module Enkidu
       @thread
     end
 
-    def join
-      @thread.join
+
+    def join(*a)
+      @thread.join(*a)
     end
+
+    def wait(*a)
+      stop
+      join(*a)
+    end
+
 
   end#class ThreadedDispatcher
 
