@@ -11,7 +11,7 @@ Gem::Specification.new do |s|
 
   s.has_rdoc          = false
 
-  s.files             = Dir['lib/**/*']
+  s.files             = ['lib/enkidu.rb', 'lib/enkidu/dispatcher.rb', 'lib/enkidu/logging.rb', 'lib/enkidu/signals.rb', 'lib/enkidu/tools.rb']
   s.require_paths     = ["lib"]
 
 end

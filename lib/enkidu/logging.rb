@@ -1,5 +1,7 @@
 require 'enkidu/dispatcher'
 require 'enkidu/tools'
+require 'securerandom'
+require 'time'
 
 module Enkidu
 
@@ -17,28 +19,30 @@ module Enkidu
     end
 
 
-    def log(atts)
-      atts = Enkidu.deep_merge(defaults, atts)
+    def log(*args)
+      atts = Enkidu.deep_merge(defaults, attify(args))
       path = atts[:type] || atts['type'] || 'log'
       dispatcher.signal(path, atts)
     end
 
-    def info(atts)
+    def info(*args)
+      atts = attify(args)
       log(Enkidu.deep_merge({tags: ['INFO']}, atts))
     end
 
-    def error(atts)
+    def error(*args)
+      atts = attify(args)
       log(Enkidu.deep_merge({tags: ['ERROR']}, atts))
     end
 
-    def exception(e)
-      atts = {tags: ['ERROR', 'EXCEPTION'], message: "#{e.class}: #{e.message}"}
+    def exception(e, *args)
+      atts = Enkidu.deep_merge({tags: ['EXCEPTION'], message: "#{e.class}: #{e.message}"}, attify(args))
       atts[:exception] = {type: e.class.name, message: e.message, stacktrace: e.backtrace}
       if e.respond_to?(:cause) && e.cause
         atts[:exception][:cause] = {type: e.cause.class.name, message: e.cause.message, stacktrace: e.cause.backtrace}
       end
 
-      log atts
+      error atts
     end
 
     def tail(pattern='#', &b)
@@ -47,6 +51,17 @@ module Enkidu
 
 
   private
+
+    def attify(args)
+      a = if args[0].is_a?(String)
+        args[1] ? {message: args[0]}.merge(args[1]) : {message: args[0]}
+      else
+        args[0] || {}
+      end
+      a[:tags] ||= []
+      a[:atts] ||= {}
+      a
+    end
 
     def dispatcher
       @dispatcher
@@ -59,6 +74,65 @@ module Enkidu
 
 
   class LogSink
+
+
+
+
+
+    class DefaultFormatter
+
+
+      def initialize
+      end
+
+
+      def generate_id
+        SecureRandom.hex(3)
+      end
+
+
+      def tags(msg)
+        return '[] ' unless msg[:tags]
+        "[#{msg[:tags].map{|t| escape_tag(t) }.join(', ')}] "
+      end
+
+
+      def attributes(msg)
+        return '{} ' unless msg[:atts]
+        "{#{msg[:atts].map{|k,v| "#{escape_attr k}=#{escape_attr v}" }.join(', ')}} "
+      end
+
+
+      def message(msg)
+        "#{msg[:message]}" +
+        (msg[:exception] ? "\n  #{msg[:exception][:type]}: #{msg[:exception][:message]}\n#{msg[:exception][:stacktrace].map{|l| "    #{l}" }.join("\n")}" : '')
+      end
+
+
+      def timestamp
+        Time.now.iso8601(3)
+      end
+
+
+      def call(msg)
+        id = generate_id
+        "<#{id} #{timestamp}> " + tags(msg) + attributes(msg) + message(msg) + " </#{id}>"
+      end
+
+
+      def escape_tag(str)
+        "#{str}".gsub(/([\[\],])/, '\\\\\\1')
+      end
+
+      def escape_attr(str)
+        "#{str}".gsub(/([\{\}=,])/, '\\\\\\1')
+      end
+
+    end#class DefaultFormatter
+
+
+
+
 
     attr_reader :filter
 
@@ -85,12 +159,7 @@ module Enkidu
     end
 
     def formatter
-      @formatter ||= -> msg do
-        (msg[:tags] ? msg[:tags].map{|t| "[#{t}]" }.join+' ' : '') +
-        (msg[:atts] ? msg[:atts].map{|k,v| "[#{k}=#{"#{v}"[0,10]}]" }.join+' ' : '') +
-        "#{msg[:message]}" +
-        (msg[:exception] ? "\n#{msg[:exception][:type]}: #{msg[:exception][:message]}\n#{msg[:exception][:stacktrace].map{|l| "  #{l}" }.join("\n")}" : '')
-      end
+      @formatter ||= DefaultFormatter.new
     end
 
 
