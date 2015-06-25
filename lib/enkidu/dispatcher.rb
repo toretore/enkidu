@@ -28,8 +28,15 @@ module Enkidu
 
     RUNNING = :running
     STOPPED = :stopped
-    STOP = Object.new
-    k=self;STOP.define_singleton_method(:inspect){ "<#{k.name}::STOP>" }
+
+    class STOP
+      def initialize(callable=nil)
+        @callable = callable
+      end
+      def call(*a)
+        @callable && @callable.call(*a)
+      end
+    end
 
     attr_reader :state
 
@@ -58,11 +65,11 @@ module Enkidu
       @state = RUNNING
       loop do
         IO.select [@r]
-        if vals = sync{ queue.shift }
-          sync{ @r.read(1) }
+        if vals = sync{ @r.read(1); queue.shift }
           callable, args = *vals
-          if callable == STOP
+          if callable.is_a?(STOP)
             @state = STOPPED
+            callable.call(*args)
             break
           else
             callable.call(*args)
@@ -82,7 +89,7 @@ module Enkidu
       callable = callable(callable, b)
       sync do
         queue.push [callable, args]
-        @w.write '.'
+        @w.write '.' #TODO Figure out what to do when this blocks (pipe is full); lock will not be released
       end
     end
     alias push schedule
@@ -106,11 +113,13 @@ module Enkidu
     #
     # This action is idempotent; it returns true if the dispatcher is currently running
     # and will be stopped, false if it's already stopped.
-    def stop
+    def stop(callable: nil, &b)
+      callable ||= b
       if stopped?
+        callable && callable.call
         false
       else
-        schedule(callable: STOP)
+        schedule(callable: STOP.new(callable))
         true
       end
     end
@@ -120,11 +129,13 @@ module Enkidu
     #
     # This action is idempotent; it returns true if the dispatcher is currently running
     # and will be stopped, false if it's already stopped.
-    def stop!
+    def stop!(callable: nil, &b)
+      callable ||= b
       if stopped?
+        callable && callable.call
         false
       else
-        unshift(callable: STOP)
+        unshift(callable: STOP.new(callable))
         true
       end
     end
@@ -257,9 +268,12 @@ module Enkidu
 
 
     def run
+      running = false
+      schedule{ running = true }
       @thread = Thread.new do
         super
       end
+      sleep 0.01 until running
       @thread.abort_on_exception = true
       @thread
     end
