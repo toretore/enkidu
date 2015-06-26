@@ -133,6 +133,71 @@ module Enkidu
 
 
 
+    class HumanFormatter
+
+      def tags(m)
+        return '' unless m[:tags] && m[:tags].any?
+        tags_separator(m) + m[:tags].map{|t| tag(t) }.join(', ')
+      end
+
+      def tag(t)
+        if ['ERROR', 'EXCEPTION'].include?(t)
+          c [1, 91], t
+        else
+          c 1, t
+        end
+      end
+
+      def tags_separator(m)
+        " #{c 96, '❯❯'} "
+      end
+
+
+      def atts(m)
+        return '' unless m[:atts] && m[:atts].any?
+        atts_separator(m) + c(37, m[:atts].map{|k,v| "#{k}: #{v}" }.join(', '))
+      end
+
+      def atts_separator(m)
+        " #{c 96, '❯❯'} "
+      end
+
+
+      def timestamp(m)
+        Time.now.strftime('%H:%M:%S')
+      end
+
+
+      def message(m)
+        " ❯❯ #{m[:message]}" +
+        (m[:exception] ? "\n  #{c 1, m[:exception][:type]}: #{m[:exception][:message]}\n#{m[:exception][:stacktrace].map{|l| "    #{l}" }.join("\n")}" : '')
+      end
+
+
+      def call(m)
+        timestamp(m) + tags(m) + atts(m) + message(m)
+      end
+
+
+      def color(n, s=nil)
+        c = Array(n).map{|nn| "\e[0;#{nn}m" }.join
+        c << "#{s}\e[0m" if s
+        c
+      end
+      alias c color
+
+
+      def stop
+        "\e[0m"
+      end
+      alias s stop
+
+
+    end#class HumanFormatter
+
+
+
+
 
     attr_reader :filter
 
