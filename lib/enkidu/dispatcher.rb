@@ -26,15 +26,20 @@ module Enkidu
   #   d.run #Blocks
   class Dispatcher
 
+    class StateError < StandardError; end
+
     RUNNING = :running
     STOPPED = :stopped
 
     class STOP
-      def initialize(callable=nil)
-        @callable = callable
+      attr_reader :callback, :cleanup
+      alias cleanup? cleanup
+      def initialize(callback:nil, cleanup:true)
+        @callback = callback
+        @cleanup = cleanup
       end
       def call(*a)
-        @callable && @callable.call(*a)
+        @callback && @callback.call(*a)
       end
     end
 
@@ -45,6 +50,8 @@ module Enkidu
       @lock = Mutex.new
       @queue = []
       @handlers = []
+      @sources = []
+      @handler_serial = -1
       @r, @w = IO.pipe
       @state = STOPPED
       yield self if block_given?
@@ -62,20 +69,48 @@ module Enkidu
 
     # Run the loop. This will block the current thread until the loop is stopped.
     def run
+      raise StateError, "Dispatcher is already running" if running?
       @state = RUNNING
       loop do
         IO.select [@r]
         if vals = sync{ @r.read(1); queue.shift }
           callable, args = *vals
           if callable.is_a?(STOP)
-            @state = STOPPED
+            if callable.cleanup?
+              sources.each do |source|
+                source.stop if source.respond_to?(:stop)
+              end
+            end
             callable.call(*args)
+            @state = STOPPED
             break
           else
             callable.call(*args)
           end
         end
       end
+    end
+
+    # Runs the loop in the same manner as `run`, but will only execute any already
+    # scheduled (as in scheduled before the call to `run_once`) callables and then stop.
+    #
+    #   d = Dispatcher.new
+    #   d.schedule{ puts "hello" }
+    #   d.run_once #Runs the 1 scheduled callable above and returns
+    def run_once(&b)
+      schedule_stop(callback: b)
+      run
+    end
+
+
+    def schedule_stop(o={}, &b)
+      o[:callback] ||= b
+      schedule(callable: STOP.new(o))
+    end
+
+    def unshift_stop(o={}, &b)
+      o[:callback] ||= b
+      unshift(callable: STOP.new(o))
     end
 
 
@@ -106,6 +141,31 @@ module Enkidu
       end
     end
 
+    # Schedule multiple callables at once
+    #
+    # Takes an array of [callable, args, position] arrays. args defaults to [], position to :back
+    # All callables are guaranteed to be added to the scheduler atomically; that is, neither of
+    # the passed callables nor any already scheduled callables will run until they have all been
+    # scheduled.
+    #
+    # The array bundles are processed in the order they appear in the array, so each callable
+    # will be added either at the back (default) or the front in that order.
+    #
+    #   #               Note: the :back here is unnecessary:
+    #   schedule_multiple([[->(msg){ puts msg }, ['hello'], :back], [->{ puts "I will run first" }, [], :front], [->{ puts "I will run last" }, []]])
+    def schedule_multiple(bundles)
+      sync do
+        bundles.each do |callable, args=[], position=:back|
+          if position == :front
+            queue.unshift [callable, args]
+          else
+            queue.push [callable, args]
+          end
+          @w.write '.'
+        end
+      end
+    end
+
 
     # Stop the dispatcher. This schedules a special STOP signal that will stop the
     # dispatcher when encountered. This means that all other items that were scheduled
@@ -113,13 +173,19 @@ module Enkidu
     #
     # This action is idempotent; it returns true if the dispatcher is currently running
     # and will be stopped, false if it's already stopped.
+    #
+    # A callable can be provided either in the form of the callable: kwarg or a block,
+    # which will be called after the dispatcher has stopped (also if dispatcher is already stopped).
+    #
+    # TODO        |------|
+    # All attached sources will have their `stop` method called before shutdown.
     def stop(callable: nil, &b)
       callable ||= b
       if stopped?
         callable && callable.call
         false
       else
-        schedule(callable: STOP.new(callable))
+        schedule_stop(callback: callable)
         true
       end
     end
@@ -129,13 +195,20 @@ module Enkidu
     #
     # This action is idempotent; it returns true if the dispatcher is currently running
     # and will be stopped, false if it's already stopped.
-    def stop!(callable: nil, &b)
+    #
+    # A callable can be provided either in the form of the `callable` option or a block,
+    # which will be called after the dispatcher has stopped (also if dispatcher is already stopped).
+    #
+    # TODO                                         |------|--> find new name for this
+    # If the `cleanup` option is true, all attached sources will have their `stop` method
+    # called before shutdown.
+    def stop!(callable: nil, cleanup: false, &b)
       callable ||= b
       if stopped?
         callable && callable.call
         false
       else
-        unshift(callable: STOP.new(callable))
+        unshift_stop(callback: callable, cleanup: cleanup)
         true
       end
     end
@@ -153,7 +226,7 @@ module Enkidu
       type = type.join('.') if Array === type
       0.upto(handlers.size - 1).each do |index|
         if vals = sync{ handlers[index] }
-          regex, handler = *vals
+          id, regex, handler = *vals
           if regex =~ type
             schedule(*args, callable: handler)
           end
@@ -179,19 +252,59 @@ module Enkidu
     #
     #   * An Array: The elements of the array are joined with a '.', and the
     #               resulting string is used as above.
+    #
+    # Returns a unique ID which can be used to deregister the handler from the
+    # dispatcher with `remove_handler`.
     def add_handler(type, callable=nil, &b)
       callable = callable(callable, b)
       regex = regex_for(type)
       sync do
-        handlers << [regex, callable]
+        id = @handler_serial+=1
+        handlers << [id, regex, callable]
+        id
       end
     end
+    alias subscribe add_handler
     alias on add_handler
 
 
+    def remove_handler(id)
+      index = handlers.index{|i,*| i == id }
+      sync{ handlers.delete_at(index) }
+    end
+    alias unsubscribe remove_handler
+
+
+    # Add a source to this dispatcher. Sources are objects that attach themselves
+    # to the dispatcher during its lifecycle and listen for or send events. Examples
+    # of sources are SignalSource, LogSource and LogSink, that use the dispatcher to
+    # listen for and dispatch interrupt signals and log messages.
+    #
+    # `source` can be any object. It can also be a class, in which case its `new` method
+    # will be called with the dispatcher as the argument. It is not required to add objects
+    # that interact with the scheduler using this method, but doing so has some advantages:
+    #
+    # * If a second argument is provided, an accessor to the object will be available
+    #   on the dispatcher with the name provided:
+    #
+    #     dispatcher.add(SignalSource, :signals)
+    #     dispatcher.signals.on_int{ puts "Got INT"; dispatcher.stop }
+    #
+    # * Any object registered in this way will have a chance to clean up its state before the
+    #   dispatcher shuts down, if it responds to `stop`:
+    #     class PingPong
+    #       def initialize(d)
+    #         @dispatcher = d
+    #         @dispatcher.on('ping'){ @dispatcher.signal('pong') }
+    #       end
+    #       def stop
+    #         @dispatcher.
+    #       end
+    #     end
     def add(source, name=nil)
-      source = source.new(self) if Class === source
+      source = source.new(self) if source.is_a?(Class)
       sync do
+        sources << source
         define_singleton_method name do
           source
         end if name
@@ -250,11 +363,28 @@ module Enkidu
       @queue
     end
 
+    def sources
+      @sources
+    end
+
     def callable(*cs)
       cs.each do |c|
         return c if c
       end
       raise ArgumentError, "No callable detected"
+    end
+
+    # Called from inside the loop to execute a callable. This method is extracted only to
+    # avoid repetition; it's not to be used for other purposes.
+    def run_callable(callable, args)
+      if callable.is_a?(STOP)
+        @state = STOPPED
+        callable.call(*args)
+        true #Loop should be stopped
+      else
+        callable.call(*args)
+        false #Loop should continue
+      end
     end
 
   end
@@ -273,13 +403,14 @@ module Enkidu
       @thread = Thread.new do
         super
       end
-      sleep 0.01 until running
+      sleep 0.01 until running #Block current thread until scheduler thread is up and running
       @thread.abort_on_exception = true
       @thread
     end
 
 
     def join(*a)
+      raise "Dispatcher not running, can't join" unless running?
       @thread.join(*a)
     end
 
