@@ -8,20 +8,6 @@ class DispatcherTest < EnkiduTestCase
   include Enkidu
 
 
-  class Waiter
-    def initialize
-      @m, @cv = Mutex.new, ConditionVariable.new
-      @signalled = false
-    end
-    def wait
-      @m.synchronize{ @cv.wait(@m) until @signalled; @signalled = false }
-    end
-    def signal
-      @m.synchronize{ @signalled = true; @cv.signal }
-    end
-  end
-
-
   test "run_once" do
     value = nil
     d = Dispatcher.new
@@ -177,6 +163,42 @@ class DispatcherTest < EnkiduTestCase
     d.schedule{ d.stop!(cleanup: true) }
     d.run
     assert_equal 'humbaba', v
+  end
+
+  test "adding a source should call the run method on the source if the dispatcher is running" do
+    v = nil
+    d = Dispatcher.new
+    w = Waiter.new
+    t = Thread.new{ d.schedule{ w.signal }; d.run }
+    s = Object.new
+    s.singleton_class.send(:define_method, :run){ v = 'humbaba' }
+    w.wait
+    d.add s
+    d.stop
+    t.join
+    assert_equal 'humbaba', v
+  end
+
+  test "adding a source should not call the run method if the dispatcher is not running" do
+    v = nil
+    d = Dispatcher.new
+    s = Object.new
+    s.singleton_class.send(:define_method, :run){ v = 'humbaba' }
+    d.add s
+    assert_nil v
+  end
+
+  test "all registered sources should have their run method called when the dispatcher starts running" do
+    c = 0
+    d = Dispatcher.new
+    s1 = Object.new
+    s1.singleton_class.send(:define_method, :run){ c += 1 }
+    s2 = Object.new
+    s2.singleton_class.send(:define_method, :run){ c += 1 }
+    d.add s1
+    d.add s2
+    d.run_once
+    assert_equal 2, c
   end
 
 

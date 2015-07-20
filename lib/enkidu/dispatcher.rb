@@ -71,6 +71,9 @@ module Enkidu
     def run
       raise StateError, "Dispatcher is already running" if running?
       @state = RUNNING
+      sources.each do |source|
+        source.run if source.respond_to?(:run)
+      end
       loop do
         IO.select [@r]
         if vals = sync{ @r.read(1); queue.shift }
@@ -290,15 +293,20 @@ module Enkidu
     #     dispatcher.add(SignalSource, :signals)
     #     dispatcher.signals.on_int{ puts "Got INT"; dispatcher.stop }
     #
-    # * Any object registered in this way will have a chance to clean up its state before the
-    #   dispatcher shuts down, if it responds to `stop`:
+    # * Any object registered in this way will have its `run` and `stop` methods called
+    #   when the dispatcher starts and stops to do initialization/cleanup. The `run`
+    #   method will also be called when a source is added if the dispatcher is already
+    #   running.
+    #
     #     class PingPong
     #       def initialize(d)
     #         @dispatcher = d
-    #         @dispatcher.on('ping'){ @dispatcher.signal('pong') }
+    #       end
+    #       def run
+    #         @handler_id = @dispatcher.on('ping'){ @dispatcher.signal('pong') }
     #       end
     #       def stop
-    #         @dispatcher.
+    #         @dispatcher.remove_handler(@handler_id)
     #       end
     #     end
     def add(source, name=nil)
@@ -309,6 +317,7 @@ module Enkidu
           source
         end if name
       end
+      source.run if running? && source.respond_to?(:run)
     end
 
 
@@ -401,10 +410,10 @@ module Enkidu
       running = false
       schedule{ running = true }
       @thread = Thread.new do
+        Thread.current.abort_on_exception = true
         super
       end
       sleep 0.01 until running #Block current thread until scheduler thread is up and running
-      @thread.abort_on_exception = true
       @thread
     end
 

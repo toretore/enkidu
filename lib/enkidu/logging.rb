@@ -206,7 +206,6 @@ module Enkidu
       @io = io
       @filter = filter
       @formatter = formatter
-      run
     end
 
     def run
