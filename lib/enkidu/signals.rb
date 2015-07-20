@@ -151,10 +151,18 @@ module Enkidu
 
     SIGNALS = SignalTrapper::SIGNALS
 
+    attr_reader :trapper
 
-    def initialize(dispatcher)
+
+    def self.trapper
+      @trappers ||= {}
+      @trappers[$$] ||= SignalTrapper.new
+    end
+
+
+    def initialize(dispatcher, trapper: self.class.trapper)
       @dispatcher = dispatcher
-      @trapper = SignalTrapper.new
+      @trapper = trapper
       @subscriptions = []
     end
 
@@ -202,10 +210,6 @@ module Enkidu
 
     def dispatcher
       @dispatcher
-    end
-
-    def trapper
-      @trapper
     end
 
 
